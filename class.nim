@@ -12,9 +12,7 @@ proc traverse(n: NimNode; action:proc(n:NimNode;parents:ref seq[NimNode]):Traver
         parents.newseq( 0 )
     parents.add( n )
     defer:
-        echo "discard parents.pop()"
         discard parents.pop()
-        assert( false ) # Nimコンパイラのバグでdeferブロックが実行されない(コンパイル時処理のみっぽい？)
 
     for it in n.children:
         case action( it, parents )
@@ -45,8 +43,8 @@ proc convertToMemberProc( procDefNode:NimNode, className:string ) =
     var selfIdentNode = newIdentDefs( ident("self"), ident(className) )
     formalParamsNode.insert( 1, selfIdentNode )
 
-macro classproc(className:untyped,stmtList:untyped):untyped=
-    var classNameStr = `$`(className.ident)
+macro classproc*(className:untyped,stmtList:untyped):untyped=
+    var classNameStr = className.strVal
     stmtList.traverse do (n:NimNode;parents:ref seq[NimNode]) -> TraverseOp:
         case n.kind
         of nnkProcDef, nnkMethodDef, nnkIteratorDef:
@@ -61,14 +59,15 @@ proc newClassDef(classNameIdent,baseNameIdent,classBody:NimNode):NimNode=
     # [2].classBodyを走査しidentDefsを見つけ次第、[1]内のRecListへコピーしていく
     #     また、ProcDefを見つけた場合は、第一引数にselfを追加してから、resultノードへProcDefを追加する
 
-    # [1]
-    result = quote:
-        type `classNameIdent` = ref object of `baseNameIdent`
-
     if classBody == nil: return
 
+    # [1]
+    var classStmt = quote:
+        type `classNameIdent` = ref object of `baseNameIdent`
+    result = newStmtList( classStmt )
+
     # RecListノードを取得(なければ作る)
-    var objectTyNode = result.findNode( nnkObjectTy )
+    var objectTyNode = classStmt.findNode( nnkObjectTy )
     if objectTyNode[2].kind == nnkEmpty:
         objectTyNode.del( 2 )
         objectTyNode.add( newNimNode( nnkRecList ) )
@@ -82,7 +81,7 @@ proc newClassDef(classNameIdent,baseNameIdent,classBody:NimNode):NimNode=
         of nnkProcDef, nnkMethodDef, nnkIteratorDef:
             var newNode = n.copyNimTree()
             result2.add( newNode )
-            newNode.convertToMemberProc( `$`(classNameIdent.ident) )
+            newNode.convertToMemberProc( classNameIdent.strVal )
             return SkipChild
         # 変数定義はフィールド定義へ追加する
         of nnkIdentDefs:
@@ -96,30 +95,29 @@ proc newClassDef(classNameIdent,baseNameIdent,classBody:NimNode):NimNode=
                 of nnkTypeDef:
                     var parentNode = parents[^1]
                     if parentNode.kind == nnkTypeSection:
-
                         # クラス名.型名でアクセスできるようにするためのヘルパーtemplateを定義
-                        var helperTemplateStr = "template $1(T:typedesc[$2]) : untyped = `T $1`".format( `$`(n[0].ident), `$`(classNameIdent.ident) )
-
-                        n[0].ident = !(`$`(classNameIdent.ident) & `$`(n[0].ident))
+                        var helperTemplateStr = "template $1(T:typedesc[$2]) : untyped = `T $1`".format( n[0].strVal, classNameIdent.strVal )
                         result2.add( parseStmt( helperTemplateStr ) )
+                        # 「型名」を「型名+クラス名」に変更
+                        n[0] = newIdentNode( classNameIdent.strVal & n[0].strVal )
                     return SkipChild
                 else:discard
             result2.add( n.copyNimTree() ) # TypeSectionまるごとコピー
             return SkipChild
         else: discard
 
-macro class(className:untyped,classBody:untyped):untyped=
+macro class*(className:untyped,classBody:untyped):untyped=
     # クラス名と基底クラス名を取得
     var classNameStr:string
     var baseNameStr:string
     case className.len()
     of 0: # class a
-        classNameStr = `$`(ident(className))
+        classNameStr = className.strVal
     of 2: # class a(b)
-        classNameStr = `$`(ident(className[0]))
-        baseNameStr = `$`(ident(className[1]))
+        classNameStr = className[0].strVal
+        baseNameStr = className[1].strVal
     of 3: # class a of b
-        classNameStr = `$`(ident(className[1]))
-        baseNameStr = `$`(ident(className[2]))
+        classNameStr = className[1].strVal
+        baseNameStr = className[2].strVal
     else: assert false
-    result = newClassDef( ident(classNameStr), if baseNameStr!=nil:ident(baseNameStr) else:ident("RootObj"),classBody)
+    result = newClassDef( newIdentNode(classNameStr), if baseNameStr.len() > 0:newIdentNode(baseNameStr) else:newIdentNode("RootObj"),classBody)
